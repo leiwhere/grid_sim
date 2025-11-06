@@ -6,14 +6,59 @@ import numpy as np
 from datetime import datetime, timedelta
 
 mcp = FastMCP(
-    name="BaoStock KData & Dividend Server",
-    instructions="提供 A 股 K 线数据获取、统计分析、缓存管理、网格交易模拟（含分红）与除权除息数据查询工具"
+    name="BaoStock Grid Strategy & Dividend Analytics Server",
+    instructions=(
+        "服务说明：\n"
+        "本服务面向 A 股市场，重点提供“网格交易 + 分红／除权送股”一体化工具，包含从数据获取、缓存管理、回测模拟到结果分析的完整流程。\n\n"
+        "一、核心功能概览：\n"
+        "  1. K 线数据获取与统计分析：默认使用 **5 分钟周期**获取指定股票历史 K 线数据（也支持其它周期，但推荐 5 分钟以提高网格触发精度）。\n"
+        "  2. 缓存机制：对每只股票的 K 线原始数据、统计结果及调用时间进行缓存，避免重复获取，加快回测流程。\n"
+        "  3. 网格交易模拟回测：使用缓存的 5 分钟数据作为基础，模拟基线价 → 网格上下触发机制；可分别设定向上突破格距 (grid_size_up) 与向下突破格距 (grid_size_down)，考虑交易费率、固定手续费、初始仓位、资金上限、分红和送股事件。\n"
+        "     – 网格交易利用市场波动，在价格上／下穿网格价位时分别触发“卖出”或“买入”操作，从而捕捉“低买高卖”机会。 :contentReference[oaicite:0]{index=0}\n"
+        "  4. 除权／送股／股息查询与处理：支持查询指定股票在某年份区间的除权、送股、现金分红数据，回测中同步处理这些事件以调整仓位或计算分红收益。\n\n"
+        "二、为什么“当前系统时间”非常重要：\n"
+        "  – 回测起始时间、结束时间以及缓存时间戳必须与系统时间保持同步，以确保数据时序、事件顺序和触发逻辑的准确性。\n"
+        "  – 在 5 分钟 K 线粒度下，每条记录都关联一个明确的时间点，若系统时间与记录时间错位，可能导致网格触发逻辑失真或交易顺序错乱。\n"
+        "  – 使用工具 get_current_time() 获取当前系统时间，可对照数据时间戳、验证缓存是否过期、亦可作为日志审计依据，从而增强结果可追踪性与可信度。\n\n"
+        "三、网格交易回测流程（推荐默认频率 5 分钟数据）\n"
+        "  1. 数据准备：调用 get_kdata(code, …) 获取股票的历史 K 线数据，并缓存。若未指定 start_date／end_date，则默认起始为两年前，结束为当前日期。\n"
+        "  2. 参数设定：\n"
+        "      – 若未指定 baseline，则系统取缓存数据首条收盘价作为基线价。\n"
+        "      – 指定统一的 grid_size，或分别设定 grid_size_up 和 grid_size_down。\n"
+        "      – 设定 trade_size、base_position、total_capital、fee_rate、fixed_fee 等参数。\n"
+        "  3. 模拟执行：按时间顺序遍历 5 分钟 K 线数据：\n"
+        "      – 判断价格是否下穿某下行网格价位 → 若触发，则执行买入。\n"
+        "      – 判断价格是否上穿某上行网格价位 → 若触发，则执行卖出。\n"
+        "      – 在遍历过程中，如检测到除权／送股／分红事件（通过 query_dividends 获取），若持仓>0，则处理相应逻辑：\n"
+        "         · 现金分红：按持仓数量计算并加入 realised_profit。\n"
+        "         · 送股：按比例新增股份并调整仓位与平均成本。\n"
+        "  4. 模拟结束：以缓存数据最后一条收盘价为结束价，计算未实现盈亏、送股价值、总盈利、资金回报率等关键统计指标。\n"
+        "  5. 结果分析与优化：\n"
+        "      – 核心指标包括 used_capital、realised_profit、unrealised_profit、total_dividends、additional_shares、capital_return_rate。\n"
+        "      – 本策略最适用于震荡横盘或波动幅度适中的行情。若市场趋势单边（强上或强下），则可能累积较大仓位或亏损。 :contentReference[oaicite:1]{index=1}\n"
+        "      – 可通过调整格距、资金限制、初始持仓、频率等参数进行多轮回测优化。\n\n"
+        "四、工具调用清单：\n"
+        "  – get_current_time(): 获取当前系统时间（ISO 格式）。\n"
+        "  – get_kdata(code, start_date, end_date, frequency='5', adjustflag='3'): 获取 K 线数据并缓存（默认频率 5 分钟）。\n"
+        "  – list_cache(): 列出当前缓存中所有股票 K 线数据情况。\n"
+        "  – delete_cache(code): 删除指定股票缓存数据。\n"
+        "  – simulate_grid(code, grid_size, trade_size, baseline=None, total_capital=None, base_position=0.0, fee_rate=0.0003, fixed_fee=5.0, grid_size_up=None, grid_size_down=None): 执行网格交易模拟回测。\n"
+        "  – query_dividends(code, start_year, end_year, yearType='report'): 查询除权／送股／股息数据并缓存，用于回测中的分红处理。\n\n"
+        "本服务旨在支持量化分析、策略回测与研究网格交易。请在理解策略逻辑、设置合理参数与控制风险后使用。"
+    )
 )
 
 # 全局缓存：K 线数据
 cache = {}
 # 全局缓存：股息／除权除息数据
 divid_cache = {}
+
+@mcp.tool()
+def get_current_time() -> str:
+    """
+    返回当前系统时间（ISO 格式字符串）。
+    """
+    return datetime.now().isoformat()
 
 @mcp.tool()
 def get_kdata(
@@ -29,7 +74,7 @@ def get_kdata(
         code        : 股票代码，如 "sh.600000" 或 "sz.000001"
         start_date  : 起始日期 "YYYY-MM-DD"，默认为空（表示两年前）
         end_date    : 结束日期 "YYYY-MM-DD"，默认为空（表示今天）
-        frequency   : K线周期，默认 "5"（5 分钟）；也可 "15","30","60","d"（日线）等
+        frequency   : K 线周期，默认 "5"（5 分钟）；也可 "15","30","60","d"（日线）等
         adjustflag  : 复权类型，默认 "3"（不复权）；"1" 后复权、"2" 前复权
     返回：
         { "stats": { … 多种统计指标 … } }
@@ -121,7 +166,7 @@ def list_cache() -> dict:
                 "timestamp": "...",
                 "count": <条目数>,
                 "start_date": "...",
-                "end_date": "..."}
+                "end_date": "..." }
              …}
         }
     """
