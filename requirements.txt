@@ -1,0 +1,4 @@
+fastmcp
+baostock
+pandas
+numpy
