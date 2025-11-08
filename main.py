@@ -4,15 +4,37 @@
 MCP Server (FastMCP) — 提供：
 - 工具 simulate_grid：网格交易模拟（含费率 + 固定费用叠加）
 - 工具 get_current_time：获取当前 UTC 时间（ISO8601）
-启动方式支持命令行参数：--transport、--host、--port
+- 工具 cache_status_full：查看内存缓存 + 当前进程 & 系统内存使用
+- 工具 clear_cache：清理内存缓存
+启动方式支持命令行参数：
+  --transport (stdio|http|sse)、--host、--port
+  --no-auto-clear （关闭自动清理缓存，默认开启）
+  --auto-clear-proc-mb (进程内存 MB 阈值)、--auto-clear-sys-avail-mb (系统可用内存 MB 阈值)
 """
 
 import argparse
 import sys
+import os
 import baostock as bs
-from typing import List, Dict, Any
+import psutil
+from typing import List, Dict, Any, Optional
 from fastmcp import FastMCP
 from datetime import datetime
+
+# ------------------------
+# 内存缓存（只在运行期间有效）
+# key 格式："{stock_code}|{start_date}|{end_date}"
+# value：List[Dict] — K 线数据
+# ------------------------
+_kline_cache: Dict[str, List[Dict[str, Any]]] = {}
+
+# ------------------------
+# 自动清理配置（默认开启）
+# 阈值：记录进程占用内存（MB）或系统可用内存（MB）时触发清理
+# ------------------------
+_AUTO_CLEAR_ENABLED = True
+_AUTO_CLEAR_PROC_MB_THRESHOLD = 300.0        # 进程占用内存 > 300 MB 时触发
+_AUTO_CLEAR_SYS_AVAILABLE_MB_THRESHOLD = 200.0  # 系统可用内存 < 200 MB 时触发
 
 # ------------------------
 # 代码规范化：转为 sz./sh.
@@ -31,13 +53,37 @@ def normalize_code_for_baostock(code: str) -> str:
     return c
 
 # ------------------------
-# 获取 5 分钟 K 线数据
+# 辅助：自动清理触发判断
+# ------------------------
+def _maybe_auto_clear_cache() -> None:
+    if not _AUTO_CLEAR_ENABLED:
+        return
+    proc = psutil.Process(os.getpid())
+    proc_mem_mb = proc.memory_info().rss / (1024 * 1024)
+    vmem = psutil.virtual_memory()
+    sys_available_mb = vmem.available / (1024 * 1024)
+
+    # 如果任一阈值触发，则清理全部缓存
+    if proc_mem_mb > _AUTO_CLEAR_PROC_MB_THRESHOLD or sys_available_mb < _AUTO_CLEAR_SYS_AVAILABLE_MB_THRESHOLD:
+        # 可加日志
+        print(f"自动清理触发：proc_mem_mb={proc_mem_mb:.2f} MB, sys_available_mb={sys_available_mb:.2f} MB", file=sys.stderr)
+        _kline_cache.clear()
+
+# ------------------------
+# 获取 5 分钟 K 线数据（含缓存机制 + 自动清理检查）
 # ------------------------
 def get_5min_kline(
     stock_code: str,
     start_date: str = "2024-01-01",
     end_date: str = "2025-12-31"
 ) -> List[Dict[str, Any]]:
+    key = f"{stock_code}|{start_date}|{end_date}"
+    if key in _kline_cache:
+        return _kline_cache[key]
+
+    # 在下载之前执行一次自动清理检查
+    _maybe_auto_clear_cache()
+
     lg = bs.login()
     if lg.error_code != '0':
         raise RuntimeError(f"Baostock login failed: {lg.error_msg}")
@@ -84,6 +130,8 @@ def get_5min_kline(
         })
 
     bs.logout()
+
+    _kline_cache[key] = data
     return data
 
 # ------------------------
@@ -95,8 +143,8 @@ def sim_grid(
     grid: float,
     shares_per_trade: int,
     kdata: List[Dict[str, Any]],
-    fee_rate: float = 0.0003,     # 默认 0.03%
-    fixed_fee: float = 5.0        # 默认每笔固定 5 元
+    fee_rate: float = 0.0003,
+    fixed_fee: float = 5.0
 ) -> Dict[str, Any]:
     cash = float(initial_capital)
     shares = float(init_shares)
@@ -113,7 +161,6 @@ def sim_grid(
         down_grid = baseline - grid
         dt = bar.get('datetime')
 
-        # 卖出
         if low_price < up_grid < high_price:
             if shares >= shares_per_trade:
                 price = up_grid
@@ -134,7 +181,6 @@ def sim_grid(
                 })
                 baseline = up_grid
 
-        # 买入
         elif low_price < down_grid < high_price:
             price = down_grid
             trade_amount = price * shares_per_trade
@@ -192,18 +238,6 @@ def simulate_grid(
     fee_rate: float = 0.0003,
     fixed_fee: float = 5.0
 ) -> Dict[str, Any]:
-    """
-    网格交易模拟工具：
-      - code：股票代码（6位或带 sz./sh. 前缀）
-      - start, end：日期范围 YYYY-MM-DD
-      - capital：初始资金
-      - base_ratio：底仓比例
-      - grid：网格距离（元）
-      - trade_size：每次交易股数
-      - fee_rate：比例费率（如 0.0003 表示 0.03%）
-      - fixed_fee：每笔固定费用（元）
-    返回 JSON 包含 input 与 result。
-    """
     std_code = normalize_code_for_baostock(code)
     kdata = get_5min_kline(std_code, start, end)
     if not kdata:
@@ -244,13 +278,47 @@ def simulate_grid(
 
 @mcp.tool()
 def get_current_time() -> str:
-    """
-    获取当前 UTC 时间（ISO8601 格式）。
-    """
     return datetime.utcnow().isoformat() + "Z"
 
+@mcp.tool()
+def cache_status_full() -> Dict[str, Any]:
+    status = { key: len(_kline_cache[key]) for key in _kline_cache }
+    proc = psutil.Process(os.getpid())
+    proc_mem_bytes = proc.memory_info().rss
+    proc_mem_mb = round(proc_mem_bytes / (1024 * 1024), 4)
+
+    vmem = psutil.virtual_memory()
+    sys_total_bytes = vmem.total
+    sys_total_mb = round(sys_total_bytes / (1024 * 1024), 4)
+    sys_available_bytes = vmem.available
+    sys_available_mb = round(sys_available_bytes / (1024 * 1024), 4)
+
+    return {
+        "cached_keys": list(_kline_cache.keys()),
+        "counts": status,
+        "total_keys": len(_kline_cache),
+        "proc_mem_bytes": proc_mem_bytes,
+        "proc_mem_mb": proc_mem_mb,
+        "sys_total_bytes": sys_total_bytes,
+        "sys_total_mb": sys_total_mb,
+        "sys_available_bytes": sys_available_bytes,
+        "sys_available_mb": sys_available_mb
+    }
+
+@mcp.tool()
+def clear_cache(key: Optional[str] = None) -> str:
+    if key:
+        if key in _kline_cache:
+            del _kline_cache[key]
+            return f"已清除缓存项：{key}"
+        else:
+            return f"未找到缓存项：{key}"
+    else:
+        _kline_cache.clear()
+        return "已清除全部缓存"
+
 # ------------------------
-# 启动入口：命令行指定 transport / host / port
+# 启动入口：命令行指定 transport / host / port + 自动清理开关 + 阈值
 # ------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="GridTradeSim MCP Server")
@@ -266,6 +334,27 @@ if __name__ == "__main__":
         "--port", type=int, default=9898,
         help="监听端口（http/sse 有效），默认 9898"
     )
+    parser.add_argument(
+        "--no-auto-clear", action="store_true",
+        help="关闭自动清理缓存（默认开启自动清理）"
+    )
+    parser.add_argument(
+        "--auto-clear-proc-mb", type=float,
+        help=f"进程占用内存触发自动清理的阈值（MB），默认 {_AUTO_CLEAR_PROC_MB_THRESHOLD}"
+    )
+    parser.add_argument(
+        "--auto-clear-sys-available-mb", type=float,
+        help=f"系统可用内存触发自动清理的阈值（MB），默认 {_AUTO_CLEAR_SYS_AVAILABLE_MB_THRESHOLD}"
+    )
+
     args = parser.parse_args()
+
+    # 解析自动清理开关
+    if args.no_auto_clear:
+        _AUTO_CLEAR_ENABLED = False
+    if args.auto_clear_proc_mb is not None:
+        _AUTO_CLEAR_PROC_MB_THRESHOLD = args.auto_clear_proc_mb
+    if args.auto_clear_sys_available_mb is not None:
+        _AUTO_CLEAR_SYS_AVAILABLE_MB_THRESHOLD = args.auto_clear_sys_available_mb
 
     mcp.run(transport=args.transport, host=args.host, port=args.port)
