@@ -357,4 +357,6 @@ if __name__ == "__main__":
     if args.auto_clear_sys_available_mb is not None:
         _AUTO_CLEAR_SYS_AVAILABLE_MB_THRESHOLD = args.auto_clear_sys_available_mb
 
+    _AUTO_CLEAR_ENABLED = False
+
     mcp.run(transport=args.transport, host=args.host, port=args.port)
