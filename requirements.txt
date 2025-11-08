@@ -2,3 +2,4 @@ fastmcp
 baostock
 pandas
 numpy
+psutil
