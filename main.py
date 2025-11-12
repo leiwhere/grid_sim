@@ -1,18 +1,5 @@
 #!/usr/bin/env python3
 # coding: utf-8
-"""
-MCP Server (FastMCP) with CORS (跨域) + SSE 预检 OPTIONS 支持
-提供：
-- 工具 simulate_grid：网格交易模拟（含费率 + 固定费用叠加）
-- 工具 get_current_time：获取当前 UTC 时间（ISO8601）
-- 工具 cache_status_full：查看内存缓存 + 当前进程 & 系统内存使用
-- 工具 clear_cache：清理内存缓存
-启动方式支持命令行参数：
-  --transport (stdio|http|sse)、--host、--port
-  --no-auto-clear （关闭自动清理缓存，默认开启）
-  --auto-clear-proc-mb (进程内存 MB 阈值)、--auto-clear-sys-avail-mb (系统可用内存 MB 阈值)
-加入跨域支持：当使用 HTTP 或 SSE 模式时，允许所有来源访问，并在 SSE 模式下显式响应 OPTIONS 预检请求。
-"""
 
 import argparse
 import sys
@@ -23,16 +10,10 @@ from datetime import datetime
 
 import baostock as bs
 from fastmcp import FastMCP
-from fastapi.responses import PlainTextResponse
-from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware import Middleware
+from starlette.middleware.cors import CORSMiddleware
 
-# ------------------------
-# 内存缓存（运行期间有效）
 _kline_cache: Dict[str, List[Dict[str, Any]]] = {}
-
-_AUTO_CLEAR_ENABLED = True
-_AUTO_CLEAR_PROC_MB_THRESHOLD = 300.0
-_AUTO_CLEAR_SYS_AVAILABLE_MB_THRESHOLD = 200.0
 
 def normalize_code_for_baostock(code: str) -> str:
     c = code.strip().lower()
@@ -40,23 +21,12 @@ def normalize_code_for_baostock(code: str) -> str:
         return c
     if len(c) == 6 and c.isdigit():
         pre3 = c[:3]
-        if pre3 in {"600", "601", "603", "605", "688", "689", "900"}:
+        if pre3 in {"600","601","603","605","688","689","900"}:
             return f"sh.{c}"
-        if pre3 in {"000", "001", "002", "003", "004", "200", "300", "301", "302"}:
+        if pre3 in {"000","001","002","003","004","200","300","301","302"}:
             return f"sz.{c}"
         return f"sz.{c}"
     return c
-
-def _maybe_auto_clear_cache() -> None:
-    if not _AUTO_CLEAR_ENABLED:
-        return
-    proc = psutil.Process(os.getpid())
-    proc_mem_mb = proc.memory_info().rss / (1024 * 1024)
-    vmem = psutil.virtual_memory()
-    sys_available_mb = vmem.available / (1024 * 1024)
-    if proc_mem_mb > _AUTO_CLEAR_PROC_MB_THRESHOLD or sys_available_mb < _AUTO_CLEAR_SYS_AVAILABLE_MB_THRESHOLD:
-        print(f"自动清理触发：proc_mem_mb={proc_mem_mb:.2f} MB, sys_available_mb={sys_available_mb:.2f} MB", file=sys.stderr)
-        _kline_cache.clear()
 
 def get_5min_kline(
     stock_code: str,
@@ -66,8 +36,6 @@ def get_5min_kline(
     key = f"{stock_code}|{start_date}|{end_date}"
     if key in _kline_cache:
         return _kline_cache[key]
-
-    _maybe_auto_clear_cache()
 
     lg = bs.login()
     if lg.error_code != '0':
@@ -202,8 +170,11 @@ def sim_grid(
         "final_price": float(final_price)
     }
 
-# ------------------------
-mcp = FastMCP("GridTradeSim")
+# 创建 MCP 服务实例并附加说明
+mcp = FastMCP(
+    "GridTradeSim",
+    description="网格交易模拟 MCP 服务 —— 提供股票代码网格交易模拟、当前时间查询、缓存状态监控与缓存清理工具"
+)
 
 @mcp.tool()
 def simulate_grid_tool(
@@ -217,6 +188,24 @@ def simulate_grid_tool(
     fee_rate: float = 0.0003,
     fixed_fee: float = 5.0
 ) -> Dict[str, Any]:
+    """
+    工具 simulate_grid_tool：
+    用途：基于指定股票代码及参数，执行 5 分钟 K 线网格交易模拟。
+    参数：
+      code: 股票代码（如 "600000"）
+      start: 起始日期，格式 "YYYY-MM-DD"
+      end: 结束日期，格式 "YYYY-MM-DD"
+      capital: 初始资金
+      base_ratio: 初次买入占资金比例
+      grid: 网格价格间隔
+      trade_size: 每次交易份额（股数）
+      fee_rate: 交易费率
+      fixed_fee: 固定交易费用
+    返回：
+      包含 final_capital, total_profit, total_fee, trades,
+      remaining_shares, cash, trade_records, initial_cost_shares,
+      initial_baseline, final_price
+    """
     std_code = normalize_code_for_baostock(code)
     kdata = get_5min_kline(std_code, start, end)
     if not kdata:
@@ -257,20 +246,22 @@ def simulate_grid_tool(
 
 @mcp.tool()
 def get_current_time_tool() -> str:
+    """工具 get_current_time_tool — 返回当前 UTC 时间（ISO8601 格式）"""
     return datetime.utcnow().isoformat() + "Z"
 
 @mcp.tool()
 def cache_status_full_tool() -> Dict[str, Any]:
+    """工具 cache_status_full_tool — 返回缓存状态、进程内存、系统内存统计"""
     status = { key: len(_kline_cache[key]) for key in _kline_cache }
     proc = psutil.Process(os.getpid())
     proc_mem_bytes = proc.memory_info().rss
-    proc_mem_mb = round(proc_mem_bytes / (1024 * 1024), 4)
+    proc_mem_mb = round(proc_mem_bytes / (1024*1024),4)
 
     vmem = psutil.virtual_memory()
     sys_total_bytes = vmem.total
-    sys_total_mb = round(sys_total_bytes / (1024 * 1024), 4)
+    sys_total_mb = round(sys_total_bytes/(1024*1024),4)
     sys_available_bytes = vmem.available
-    sys_available_mb = round(sys_available_bytes / (1024 * 1024), 4)
+    sys_available_mb = round(sys_available_bytes/(1024*1024),4)
 
     return {
         "cached_keys": list(_kline_cache.keys()),
@@ -286,6 +277,7 @@ def cache_status_full_tool() -> Dict[str, Any]:
 
 @mcp.tool()
 def clear_cache_tool(key: Optional[str] = None) -> str:
+    """工具 clear_cache_tool — 清理缓存；可指定 key 或清除全部"""
     if key:
         if key in _kline_cache:
             del _kline_cache[key]
@@ -296,62 +288,39 @@ def clear_cache_tool(key: Optional[str] = None) -> str:
         _kline_cache.clear()
         return "已清除全部缓存"
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="GridTradeSim MCP Server with CORS + SSE OPTIONS 支持")
+def main():
+    parser = argparse.ArgumentParser(description="GridTradeSim MCP Server with CORS 支持")
     parser.add_argument(
         "--transport", choices=["stdio","http","sse"], default="http",
-        help="传输方式（stdio | http | sse），默认 http"
+        help="传输方式（stdio | http | sse）"
     )
     parser.add_argument(
         "--host", default="0.0.0.0",
-        help="监听主机（http/sse 有效），默认 0.0.0.0"
+        help="监听主机"
     )
     parser.add_argument(
         "--port", type=int, default=9898,
-        help="监听端口（http/sse 有效），默认 9898"
-    )
-    parser.add_argument(
-        "--no-auto-clear", action="store_true",
-        help="关闭自动清理缓存（默认开启）"
-    )
-    parser.add_argument(
-        "--auto-clear-proc-mb", type=float,
-        help=f"进程占用内存触发自动清理的阈值（MB），默认 {_AUTO_CLEAR_PROC_MB_THRESHOLD}"
-    )
-    parser.add_argument(
-        "--auto-clear-sys-available-mb", type=float,
-        help=f"系统可用内存触发自动清理的阈值（MB），默认 {_AUTO_CLEAR_SYS_AVAILABLE_MB_THRESHOLD}"
+        help="监听端口"
     )
 
     args = parser.parse_args()
 
-    if args.no_auto_clear:
-        _AUTO_CLEAR_ENABLED = False
-    if args.auto_clear_proc_mb is not None:
-        _AUTO_CLEAR_PROC_MB_THRESHOLD = args.auto_clear_proc_mb
-    if args.auto_clear_sys_available_mb is not None:
-        _AUTO_CLEAR_SYS_AVAILABLE_MB_THRESHOLD = args.auto_clear_sys_available_mb
+    # 定义 CORS 中间件
+    middleware = [
+        Middleware(
+            CORSMiddleware,
+            allow_origins=["*"],                # 允许所有来源，生产环境建议更严格
+            allow_methods=["GET","POST","DELETE","OPTIONS"],
+            allow_headers=["mcp-protocol-version","mcp-session-id","Authorization","Content-Type"],
+            expose_headers=["mcp-session-id"]
+        )
+    ]
 
-    # **不带凭据，允许任意来源**
-    if args.transport in ("http","sse"):
-        try:
-            mcp.app.add_middleware(
-                CORSMiddleware,
-                allow_origins=["*"],        # 允许所有来源
-                allow_credentials=False,    # 🟢 关键改动：关闭凭据
-                allow_methods=["*"],
-                allow_headers=["*"],
-                expose_headers=["*"],
-                max_age=86400,              # 可选：预检缓存时间（秒）
-            )
-        except Exception as e:
-            print(f"⚠️ 未能为 FastMCP 添加 CORS: {e}", file=sys.stderr)
+    # 获取 ASGI 应用
+    mcp_app = mcp.http_app(path="/mcp", middleware=middleware)
 
-        # 如果是 SSE 模式（或你专门想处理 OPTIONS），你也可以保留下面这一段：
-        if args.transport == "http":
-            @mcp.app.options("/mcp")
-            async def _sse_preflight_options():
-                return PlainTextResponse("OK", status_code=200)
+    import uvicorn
+    uvicorn.run(mcp_app, host=args.host, port=args.port)
 
-    # 启动 MCP 服务
-    mcp.run(transport=args.transport, host=args.host, port=args.port)
+if __name__ == "__main__":
+    main()
