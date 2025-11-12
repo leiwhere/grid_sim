@@ -3,3 +3,4 @@ baostock
 pandas
 numpy
 psutil
+fastapi
