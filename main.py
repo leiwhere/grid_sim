@@ -17,34 +17,23 @@ MCP Server (FastMCP) with CORS (跨域) + SSE 预检 OPTIONS 支持
 import argparse
 import sys
 import os
-import baostock as bs
 import psutil
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
+import baostock as bs
 from fastmcp import FastMCP
-# 引入 FastAPI 响应类型，以便为 OPTIONS 返回
 from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 # ------------------------
 # 内存缓存（运行期间有效）
-# key 格式："{stock_code}|{start_date}|{end_date}"
-# value：List[Dict] — K线数据
-# ------------------------
 _kline_cache: Dict[str, List[Dict[str, Any]]] = {}
 
-# ------------------------
-# 自动清理配置（默认开启）
-# 阈值：记录进程占用内存（MB）或系统可用内存（MB）时触发清理
-# ------------------------
 _AUTO_CLEAR_ENABLED = True
-_AUTO_CLEAR_PROC_MB_THRESHOLD = 300.0        # 进程占用内存 > 300 MB 时触发
-_AUTO_CLEAR_SYS_AVAILABLE_MB_THRESHOLD = 200.0  # 系统可用内存 < 200 MB 时触发
+_AUTO_CLEAR_PROC_MB_THRESHOLD = 300.0
+_AUTO_CLEAR_SYS_AVAILABLE_MB_THRESHOLD = 200.0
 
-# ------------------------
-# 代码规范化：转为 sz./sh.
-# ------------------------
 def normalize_code_for_baostock(code: str) -> str:
     c = code.strip().lower()
     if "." in c and (c.startswith("sz.") or c.startswith("sh.")):
@@ -58,9 +47,6 @@ def normalize_code_for_baostock(code: str) -> str:
         return f"sz.{c}"
     return c
 
-# ------------------------
-# 辅助：自动清理触发判断
-# ------------------------
 def _maybe_auto_clear_cache() -> None:
     if not _AUTO_CLEAR_ENABLED:
         return
@@ -68,15 +54,10 @@ def _maybe_auto_clear_cache() -> None:
     proc_mem_mb = proc.memory_info().rss / (1024 * 1024)
     vmem = psutil.virtual_memory()
     sys_available_mb = vmem.available / (1024 * 1024)
-
-    # 如果任一阈值触发，则清理全部缓存
     if proc_mem_mb > _AUTO_CLEAR_PROC_MB_THRESHOLD or sys_available_mb < _AUTO_CLEAR_SYS_AVAILABLE_MB_THRESHOLD:
         print(f"自动清理触发：proc_mem_mb={proc_mem_mb:.2f} MB, sys_available_mb={sys_available_mb:.2f} MB", file=sys.stderr)
         _kline_cache.clear()
 
-# ------------------------
-# 获取 5 分钟 K 线数据（含缓存机制 + 自动清理检查）
-# ------------------------
 def get_5min_kline(
     stock_code: str,
     start_date: str = "2024-01-01",
@@ -137,9 +118,6 @@ def get_5min_kline(
     _kline_cache[key] = data
     return data
 
-# ------------------------
-# 网格交易模拟
-# ------------------------
 def sim_grid(
     initial_capital: float,
     init_shares: float,
@@ -224,8 +202,6 @@ def sim_grid(
         "final_price": float(final_price)
     }
 
-# ------------------------
-# MCP Server & 工具注册
 # ------------------------
 mcp = FastMCP("GridTradeSim")
 
@@ -320,13 +296,10 @@ def clear_cache_tool(key: Optional[str] = None) -> str:
         _kline_cache.clear()
         return "已清除全部缓存"
 
-# ------------------------
-# 启动入口：命令行指定 transport / host / port + 自动清理开关 + 阈值
-# ------------------------
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="GridTradeSim MCP Server with CORS + SSE OPTIONS support")
+    parser = argparse.ArgumentParser(description="GridTradeSim MCP Server with CORS + SSE OPTIONS 支持")
     parser.add_argument(
-        "--transport", choices=["stdio", "http", "sse"], default="http",
+        "--transport", choices=["stdio","http","sse"], default="http",
         help="传输方式（stdio | http | sse），默认 http"
     )
     parser.add_argument(
@@ -339,7 +312,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--no-auto-clear", action="store_true",
-        help="关闭自动清理缓存（默认开启自动清理）"
+        help="关闭自动清理缓存（默认开启）"
     )
     parser.add_argument(
         "--auto-clear-proc-mb", type=float,
@@ -352,7 +325,6 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # 解析自动清理开关
     if args.no_auto_clear:
         _AUTO_CLEAR_ENABLED = False
     if args.auto_clear_proc_mb is not None:
@@ -360,25 +332,26 @@ if __name__ == "__main__":
     if args.auto_clear_sys_available_mb is not None:
         _AUTO_CLEAR_SYS_AVAILABLE_MB_THRESHOLD = args.auto_clear_sys_available_mb
 
-    _AUTO_CLEAR_ENABLED = False
-
-    # 如果是 HTTP 或 SSE 模式，启用 CORS
-    if args.transport in ("http", "sse"):
+    # **不带凭据，允许任意来源**
+    if args.transport in ("http","sse"):
         try:
             mcp.app.add_middleware(
                 CORSMiddleware,
-                allow_origins=["*"],           # 允许所有来源
-                allow_credentials=True,
-                allow_methods=["*"],           # 允许所有方法（包括 OPTIONS）
-                allow_headers=["*"],           # 允许所有请求头
+                allow_origins=["*"],        # 允许所有来源
+                allow_credentials=False,    # 🟢 关键改动：关闭凭据
+                allow_methods=["*"],
+                allow_headers=["*"],
+                expose_headers=["*"],
+                max_age=86400,              # 可选：预检缓存时间（秒）
             )
-            # 如果使用 SSE 模式，则为 /mcp 路径显式增加 OPTIONS 处理
-            if args.transport == "http":
-                @mcp.app.options("/mcp")
-                async def _sse_preflight_options():
-                    return PlainTextResponse("OK", status_code=200)
         except Exception as e:
-            print(f"⚠️ 未能为 FastMCP 添加 CORS/OPTIONS 支持: {e}", file=sys.stderr)
+            print(f"⚠️ 未能为 FastMCP 添加 CORS: {e}", file=sys.stderr)
+
+        # 如果是 SSE 模式（或你专门想处理 OPTIONS），你也可以保留下面这一段：
+        if args.transport == "http":
+            @mcp.app.options("/mcp")
+            async def _sse_preflight_options():
+                return PlainTextResponse("OK", status_code=200)
 
     # 启动 MCP 服务
     mcp.run(transport=args.transport, host=args.host, port=args.port)
