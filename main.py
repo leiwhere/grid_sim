@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # coding: utf-8
 """
-MCP Server (FastMCP) with CORS (跨域) 支持
+MCP Server (FastMCP) with CORS (跨域) + SSE 预检 OPTIONS 支持
 提供：
 - 工具 simulate_grid：网格交易模拟（含费率 + 固定费用叠加）
 - 工具 get_current_time：获取当前 UTC 时间（ISO8601）
@@ -11,7 +11,7 @@ MCP Server (FastMCP) with CORS (跨域) 支持
   --transport (stdio|http|sse)、--host、--port
   --no-auto-clear （关闭自动清理缓存，默认开启）
   --auto-clear-proc-mb (进程内存 MB 阈值)、--auto-clear-sys-avail-mb (系统可用内存 MB 阈值)
-加入跨域支持：当使用 HTTP 或 SSE 模式时，允许所有来源访问。
+加入跨域支持：当使用 HTTP 或 SSE 模式时，允许所有来源访问，并在 SSE 模式下显式响应 OPTIONS 预检请求。
 """
 
 import argparse
@@ -22,14 +22,15 @@ import psutil
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
-# 假设 fastmcp 模块会内部用 FastAPI 或者有 .app 属性
 from fastmcp import FastMCP
+# 引入 FastAPI 响应类型，以便为 OPTIONS 返回
+from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 # ------------------------
 # 内存缓存（运行期间有效）
 # key 格式："{stock_code}|{start_date}|{end_date}"
-# value：List[Dict] — K 线数据
+# value：List[Dict] — K线数据
 # ------------------------
 _kline_cache: Dict[str, List[Dict[str, Any]]] = {}
 
@@ -70,7 +71,6 @@ def _maybe_auto_clear_cache() -> None:
 
     # 如果任一阈值触发，则清理全部缓存
     if proc_mem_mb > _AUTO_CLEAR_PROC_MB_THRESHOLD or sys_available_mb < _AUTO_CLEAR_SYS_AVAILABLE_MB_THRESHOLD:
-        # 可加日志
         print(f"自动清理触发：proc_mem_mb={proc_mem_mb:.2f} MB, sys_available_mb={sys_available_mb:.2f} MB", file=sys.stderr)
         _kline_cache.clear()
 
@@ -86,7 +86,6 @@ def get_5min_kline(
     if key in _kline_cache:
         return _kline_cache[key]
 
-    # 在下载之前执行一次自动清理检查
     _maybe_auto_clear_cache()
 
     lg = bs.login()
@@ -135,7 +134,6 @@ def get_5min_kline(
         })
 
     bs.logout()
-
     _kline_cache[key] = data
     return data
 
@@ -326,7 +324,7 @@ def clear_cache_tool(key: Optional[str] = None) -> str:
 # 启动入口：命令行指定 transport / host / port + 自动清理开关 + 阈值
 # ------------------------
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="GridTradeSim MCP Server with CORS")
+    parser = argparse.ArgumentParser(description="GridTradeSim MCP Server with CORS + SSE OPTIONS support")
     parser.add_argument(
         "--transport", choices=["stdio", "http", "sse"], default="sse",
         help="传输方式（stdio | http | sse），默认 sse"
@@ -362,19 +360,25 @@ if __name__ == "__main__":
     if args.auto_clear_sys_available_mb is not None:
         _AUTO_CLEAR_SYS_AVAILABLE_MB_THRESHOLD = args.auto_clear_sys_available_mb
 
+    _AUTO_CLEAR_ENABLED = False
+
     # 如果是 HTTP 或 SSE 模式，启用 CORS
     if args.transport in ("http", "sse"):
-        # 确保 mcp 对象有 .app 属性（FastAPI 实例）
         try:
             mcp.app.add_middleware(
                 CORSMiddleware,
                 allow_origins=["*"],           # 允许所有来源
                 allow_credentials=True,
-                allow_methods=["*"],           # 允许所有方法
+                allow_methods=["*"],           # 允许所有方法（包括 OPTIONS）
                 allow_headers=["*"],           # 允许所有请求头
             )
+            # 如果使用 SSE 模式，则为 /sse 路径显式增加 OPTIONS 处理
+            if args.transport == "sse":
+                @mcp.app.options("/sse")
+                async def _sse_preflight_options():
+                    return PlainTextResponse("OK", status_code=200)
         except Exception as e:
-            print(f"⚠️ 未能为 FastMCP 添加 CORS 中间件: {e}", file=sys.stderr)
+            print(f"⚠️ 未能为 FastMCP 添加 CORS/OPTIONS 支持: {e}", file=sys.stderr)
 
     # 启动 MCP 服务
     mcp.run(transport=args.transport, host=args.host, port=args.port)
