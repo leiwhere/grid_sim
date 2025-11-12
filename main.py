@@ -326,8 +326,8 @@ def clear_cache_tool(key: Optional[str] = None) -> str:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="GridTradeSim MCP Server with CORS + SSE OPTIONS support")
     parser.add_argument(
-        "--transport", choices=["stdio", "http", "sse"], default="sse",
-        help="传输方式（stdio | http | sse），默认 sse"
+        "--transport", choices=["stdio", "http", "sse"], default="http",
+        help="传输方式（stdio | http | sse），默认 http"
     )
     parser.add_argument(
         "--host", default="0.0.0.0",
