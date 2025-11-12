@@ -170,8 +170,8 @@ def sim_grid(
         "final_price": float(final_price)
     }
 
-# 创建 MCP 服务实例并附加说明
-mcp = FastMCP( "GridTradeSim")
+# 创建 MCP 实例（不带 description 参数，因为当前版本不支持）
+mcp = FastMCP("GridTradeSim")
 
 @mcp.tool()
 def simulate_grid_tool(
@@ -302,18 +302,17 @@ def main():
 
     args = parser.parse_args()
 
-    # 定义 CORS 中间件
     middleware = [
         Middleware(
             CORSMiddleware,
-            allow_origins=["*"],                # 允许所有来源，生产环境建议更严格
+            allow_origins=["*"],                # 允许所有来源（生产环境建议改为白名单）
             allow_methods=["GET","POST","DELETE","OPTIONS"],
             allow_headers=["mcp-protocol-version","mcp-session-id","Authorization","Content-Type"],
             expose_headers=["mcp-session-id"]
         )
     ]
 
-    # 获取 ASGI 应用
+    # 获取 ASGI 应用，同时挂载 CORS 中间件
     mcp_app = mcp.http_app(path="/mcp", middleware=middleware)
 
     import uvicorn
