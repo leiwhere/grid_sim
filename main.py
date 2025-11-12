@@ -372,9 +372,9 @@ if __name__ == "__main__":
                 allow_methods=["*"],           # 允许所有方法（包括 OPTIONS）
                 allow_headers=["*"],           # 允许所有请求头
             )
-            # 如果使用 SSE 模式，则为 /sse 路径显式增加 OPTIONS 处理
-            if args.transport == "sse":
-                @mcp.app.options("/sse")
+            # 如果使用 SSE 模式，则为 /mcp 路径显式增加 OPTIONS 处理
+            if args.transport == "http":
+                @mcp.app.options("/mcp")
                 async def _sse_preflight_options():
                     return PlainTextResponse("OK", status_code=200)
         except Exception as e:
