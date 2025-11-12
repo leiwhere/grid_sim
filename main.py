@@ -171,10 +171,7 @@ def sim_grid(
     }
 
 # 创建 MCP 服务实例并附加说明
-mcp = FastMCP(
-    "GridTradeSim",
-    description="网格交易模拟 MCP 服务 —— 提供股票代码网格交易模拟、当前时间查询、缓存状态监控与缓存清理工具"
-)
+mcp = FastMCP( "GridTradeSim")
 
 @mcp.tool()
 def simulate_grid_tool(
