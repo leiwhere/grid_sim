@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # coding: utf-8
 """
-MCP Server (FastMCP) — 提供：
+MCP Server (FastMCP) with CORS (跨域) 支持
+提供：
 - 工具 simulate_grid：网格交易模拟（含费率 + 固定费用叠加）
 - 工具 get_current_time：获取当前 UTC 时间（ISO8601）
 - 工具 cache_status_full：查看内存缓存 + 当前进程 & 系统内存使用
@@ -10,6 +11,7 @@ MCP Server (FastMCP) — 提供：
   --transport (stdio|http|sse)、--host、--port
   --no-auto-clear （关闭自动清理缓存，默认开启）
   --auto-clear-proc-mb (进程内存 MB 阈值)、--auto-clear-sys-avail-mb (系统可用内存 MB 阈值)
+加入跨域支持：当使用 HTTP 或 SSE 模式时，允许所有来源访问。
 """
 
 import argparse
@@ -18,11 +20,14 @@ import os
 import baostock as bs
 import psutil
 from typing import List, Dict, Any, Optional
-from fastmcp import FastMCP
 from datetime import datetime
 
+# 假设 fastmcp 模块会内部用 FastAPI 或者有 .app 属性
+from fastmcp import FastMCP
+from fastapi.middleware.cors import CORSMiddleware
+
 # ------------------------
-# 内存缓存（只在运行期间有效）
+# 内存缓存（运行期间有效）
 # key 格式："{stock_code}|{start_date}|{end_date}"
 # value：List[Dict] — K 线数据
 # ------------------------
@@ -217,7 +222,7 @@ def sim_grid(
         "cash": round(cash,4),
         "trade_records": trade_records,
         "initial_cost_shares": float(init_shares),
-        "initial_baseline": float(kdata[0]['open']),
+        "initial_baseline": float(first_open),
         "final_price": float(final_price)
     }
 
@@ -227,7 +232,7 @@ def sim_grid(
 mcp = FastMCP("GridTradeSim")
 
 @mcp.tool()
-def simulate_grid(
+def simulate_grid_tool(
     code: str,
     start: str = "2024-01-01",
     end: str = "2025-12-31",
@@ -277,11 +282,11 @@ def simulate_grid(
     }
 
 @mcp.tool()
-def get_current_time() -> str:
+def get_current_time_tool() -> str:
     return datetime.utcnow().isoformat() + "Z"
 
 @mcp.tool()
-def cache_status_full() -> Dict[str, Any]:
+def cache_status_full_tool() -> Dict[str, Any]:
     status = { key: len(_kline_cache[key]) for key in _kline_cache }
     proc = psutil.Process(os.getpid())
     proc_mem_bytes = proc.memory_info().rss
@@ -306,7 +311,7 @@ def cache_status_full() -> Dict[str, Any]:
     }
 
 @mcp.tool()
-def clear_cache(key: Optional[str] = None) -> str:
+def clear_cache_tool(key: Optional[str] = None) -> str:
     if key:
         if key in _kline_cache:
             del _kline_cache[key]
@@ -321,7 +326,7 @@ def clear_cache(key: Optional[str] = None) -> str:
 # 启动入口：命令行指定 transport / host / port + 自动清理开关 + 阈值
 # ------------------------
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="GridTradeSim MCP Server")
+    parser = argparse.ArgumentParser(description="GridTradeSim MCP Server with CORS")
     parser.add_argument(
         "--transport", choices=["stdio", "http", "sse"], default="sse",
         help="传输方式（stdio | http | sse），默认 sse"
@@ -357,6 +362,19 @@ if __name__ == "__main__":
     if args.auto_clear_sys_available_mb is not None:
         _AUTO_CLEAR_SYS_AVAILABLE_MB_THRESHOLD = args.auto_clear_sys_available_mb
 
-    _AUTO_CLEAR_ENABLED = False
+    # 如果是 HTTP 或 SSE 模式，启用 CORS
+    if args.transport in ("http", "sse"):
+        # 确保 mcp 对象有 .app 属性（FastAPI 实例）
+        try:
+            mcp.app.add_middleware(
+                CORSMiddleware,
+                allow_origins=["*"],           # 允许所有来源
+                allow_credentials=True,
+                allow_methods=["*"],           # 允许所有方法
+                allow_headers=["*"],           # 允许所有请求头
+            )
+        except Exception as e:
+            print(f"⚠️ 未能为 FastMCP 添加 CORS 中间件: {e}", file=sys.stderr)
 
+    # 启动 MCP 服务
     mcp.run(transport=args.transport, host=args.host, port=args.port)
