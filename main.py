@@ -306,9 +306,10 @@ def main():
         Middleware(
             CORSMiddleware,
             allow_origins=["*"],                # 允许所有来源（生产环境建议改为白名单）
-            allow_methods=["GET","POST","DELETE","OPTIONS"],
-            allow_headers=["mcp-protocol-version","mcp-session-id","Authorization","Content-Type"],
-            expose_headers=["mcp-session-id"]
+            allow_methods=["*"],                # 允许所有 HTTP 方法
+            allow_headers=["*"],                # 允许所有自定义请求头
+            expose_headers=["*"],               # 暴露所有响应头
+            allow_credentials=True             # 允许跨域发送凭据（如 Cookie）
         )
     ]
 
