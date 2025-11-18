@@ -295,7 +295,7 @@ def create_dual_mode_app():
             allow_methods=["*"],
             allow_headers=["*"],
             expose_headers=["*"],
-            allow_credentials=True
+            allow_credentials=False
         )
     ]
     
